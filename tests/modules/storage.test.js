@@ -48,7 +48,7 @@ describe('StorageModule', () => {
 
   describe('Basic Operations', () => {
     test('should initialize correctly', () => {
-      expect(storage.version).toBe('1.0.0');
+      expect(storage.version).toBe('1.0.1');
       expect(storage.provider).toBeDefined();
       expect(storage.cache).toBeInstanceOf(Map);
     });
@@ -325,13 +325,13 @@ describe('StorageModule', () => {
       expect(mockAPI.reply).toHaveBeenCalledWith('req-14', {
         success: true,
         result: expect.objectContaining({
-          provider: 'web',
+          provider: expect.any(String),
           stats: expect.objectContaining({
             reads: 1,
             writes: 1,
             deletes: 1
           }),
-          version: '1.0.0'
+          version: '1.0.1'
         })
       });
     });

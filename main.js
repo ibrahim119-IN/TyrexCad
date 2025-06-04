@@ -1,14 +1,15 @@
 /**
- * TyrexCad Main Entry Point - FIXED
+ * TyrexCad Main Entry Point - WITH OCCT SUPPORT
  * 
- * نسخة مبسطة وصحيحة
+ * نسخة كاملة مع دعم محرك CAD
  */
 
 import { MessageBus } from './core/message-bus.js';
 import { ModuleLoader } from './core/module-loader.js';
 import { LifecycleManager } from './core/lifecycle.js';
+import { OCCTBridge } from './core/occt-bridge.js';
 
-// استيراد الوحدات الموجودة فعلاً
+// استيراد الوحدات الموجودة
 import EchoModule from './modules/echo/index.js';
 import CounterModule from './modules/counter/index.js';
 import StorageModule from './modules/storage/index.js';
@@ -20,20 +21,23 @@ async function initializeTyrexCad() {
   try {
     console.log('🚀 Starting TyrexCad...');
     
-    // 1. إنشاء النظام الأساسي بإعدادات بسيطة
+    // 1. إنشاء النظام الأساسي
     const messageBus = new MessageBus({
       enableLogging: import.meta.env.DEV,
-      enablePriorityQueue: false, // نبدأ بسيط
+      enablePriorityQueue: false,
       productionMode: import.meta.env.PROD
     });
     
     // 2. إنشاء مدير دورة الحياة
     const lifecycle = new LifecycleManager(messageBus);
     
-    // 3. إنشاء محمل الوحدات
+    // 3. إنشاء OCCT Bridge
+    const occtBridge = new OCCTBridge(messageBus);
+    
+    // 4. إنشاء محمل الوحدات
     const moduleLoader = new ModuleLoader(messageBus, lifecycle);
     
-    // 4. تسجيل الوحدات الموجودة
+    // 5. تسجيل الوحدات
     moduleLoader.registerModuleType('echo', EchoModule);
     moduleLoader.registerModuleType('counter', CounterModule);
     moduleLoader.registerModuleType('storage', StorageModule);
@@ -41,14 +45,19 @@ async function initializeTyrexCad() {
     moduleLoader.registerModuleType('shell', ShellModule);
     moduleLoader.registerModuleType('desktop-features', DesktopFeaturesModule);
     
-    // 5. تحميل الوحدات الأساسية
+    // 6. تحميل الوحدات الأساسية بالترتيب الصحيح
     console.log('📦 Loading core modules...');
     
-    // Storage أولاً - مطلوب للوحدات الأخرى
+    // Storage أولاً
     await moduleLoader.loadModule('storage');
     
     // Resources بعد Storage
     await moduleLoader.loadModule('resources');
+    
+    // تهيئة OCCT بعد Resources
+    console.log('🔧 Initializing OCCT Bridge...');
+    await occtBridge.initialize();
+    console.log('✅ OCCT Bridge initialized');
     
     // Shell UI
     await moduleLoader.loadModule('shell');
@@ -56,22 +65,23 @@ async function initializeTyrexCad() {
     // Desktop features إذا كان متاحاً
     await moduleLoader.loadModule('desktop-features');
     
-    // وحدات demo للاختبار
+    // وحدات demo في وضع التطوير
     if (import.meta.env.DEV) {
       await moduleLoader.loadModule('echo');
       await moduleLoader.loadModule('counter');
     }
     
-    // 6. إخفاء شاشة التحميل
+    // 7. إخفاء شاشة التحميل
     const loadingEl = document.getElementById('loading');
     if (loadingEl) {
       loadingEl.style.display = 'none';
     }
     
-    // 7. بث رسالة أن النظام جاهز
+    // 8. بث رسالة أن النظام جاهز
     messageBus.emit('system.ready', {
       timestamp: Date.now(),
       modules: moduleLoader.getLoadedModules(),
+      occtReady: true,
       mode: import.meta.env.PROD ? 'production' : 'development'
     });
     
@@ -83,6 +93,7 @@ async function initializeTyrexCad() {
         messageBus,
         lifecycle,
         moduleLoader,
+        occtBridge,
         // اختصارات مفيدة
         emit: (event, data) => messageBus.emit(event, data),
         on: (event, handler) => messageBus.on(event, handler),
@@ -95,8 +106,9 @@ async function initializeTyrexCad() {
     }
     
     // معالجة إيقاف التطبيق
-    window.addEventListener('beforeunload', () => {
-      lifecycle.shutdown();
+    window.addEventListener('beforeunload', async () => {
+      await occtBridge.shutdown();
+      await lifecycle.shutdown();
       messageBus.destroy();
     });
     
@@ -110,6 +122,9 @@ async function initializeTyrexCad() {
         <div style="color: #ff4444;">
           <h2>Initialization Failed</h2>
           <p>${error.message}</p>
+          <pre style="font-size: 12px; text-align: left; max-width: 600px; margin: 20px auto;">
+${error.stack}
+          </pre>
         </div>
       `;
     }

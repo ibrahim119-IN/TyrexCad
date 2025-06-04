@@ -511,13 +511,26 @@ describe('MessageBus Core - Enhanced Version', () => {
     });
 
     test('should format uptime correctly', () => {
-      const stats = messageBus.getStats();
-      expect(stats.uptimeHuman).toMatch(/^\d+s$/); // مثل "5s"
+      // اختبار formatUptime مباشرة
+      expect(messageBus.formatUptime(0)).toBe('0s');
+      expect(messageBus.formatUptime(5000)).toBe('5s');
+      expect(messageBus.formatUptime(65000)).toBe('1m 5s');
+      expect(messageBus.formatUptime(3665000)).toBe('1h 1m');
+      expect(messageBus.formatUptime(90000000)).toBe('1d 1h'); // 25 ساعة
       
-      // محاكاة uptime طويل
-      messageBus.stats.startTime = Date.now() - (25 * 60 * 60 * 1000); // 25 ساعة
-      const longStats = messageBus.getStats();
-      expect(longStats.uptimeHuman).toMatch(/^\d+d \d+h$/); // مثل "1d 1h"
+      // اختبار getStats مع uptime قصير
+      const shortStats = messageBus.getStats();
+      expect(shortStats.uptimeHuman).toMatch(/^\d+s$/);
+      
+      // اختبار getStats مع uptime طويل
+      const oldBus = new MessageBus();
+      oldBus.stats.startTime = Date.now() - (25 * 60 * 60 * 1000); // 25 ساعة
+      oldBus._statsCache = null; // مسح cache الإحصائيات
+      
+      const longStats = oldBus.getStats();
+      expect(longStats.uptimeHuman).toMatch(/^\d+d \d+h$/);
+      
+      oldBus.destroy();
     });
 
     test('should track all statistics accurately', async () => {

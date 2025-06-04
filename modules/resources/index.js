@@ -282,29 +282,72 @@ export default class ResourcesModule {
   }
 
   /**
-   * كشف نوع المورد
+   * كشف نوع المورد بشكل أكثر شمولية
    */
   detectType(url, contentType) {
     // بناءً على الامتداد
     const ext = url.split('.').pop().toLowerCase();
     
     switch (ext) {
+      // نصوص
       case 'json':
         return 'json';
       case 'txt':
       case 'md':
       case 'css':
       case 'js':
+      case 'html':
+      case 'xml':
+      case 'csv':
         return 'text';
+        
+      // ثنائيات خاصة
       case 'wasm':
         return 'wasm';
+        
+      // صور
       case 'jpg':
       case 'jpeg':
       case 'png':
       case 'gif':
       case 'webp':
       case 'svg':
+      case 'ico':
+      case 'bmp':
         return 'blob';
+        
+      // ملفات مضغوطة
+      case 'zip':
+      case 'gz':
+      case 'tar':
+      case 'rar':
+      case '7z':
+        return 'arraybuffer';
+        
+      // مستندات
+      case 'pdf':
+        return 'blob';
+        
+      // CAD files
+      case 'step':
+      case 'stp':
+      case 'iges':
+      case 'igs':
+      case 'stl':
+      case 'obj':
+      case 'dxf':
+      case 'dwg':
+        return 'arraybuffer';
+        
+      // صوت وفيديو
+      case 'mp3':
+      case 'wav':
+      case 'ogg':
+      case 'mp4':
+      case 'webm':
+      case 'avi':
+        return 'blob';
+        
       default:
         // بناءً على content-type
         if (contentType) {
@@ -312,7 +355,12 @@ export default class ResourcesModule {
           if (contentType.includes('text')) return 'text';
           if (contentType.includes('wasm')) return 'wasm';
           if (contentType.includes('image')) return 'blob';
+          if (contentType.includes('pdf')) return 'blob';
+          if (contentType.includes('video')) return 'blob';
+          if (contentType.includes('audio')) return 'blob';
         }
+        
+        // افتراضي
         return 'arraybuffer';
     }
   }

@@ -1,17 +1,24 @@
 /**
- * Counter Module - وحدة عداد بحالة داخلية
- * 
- * تُظهر كيفية إدارة الحالة الداخلية والتواصل عبر الرسائل فقط
+ * Counter Module - وحدة عداد بحالة داخلية محدودة
+ * @module CounterModule
+ * @version 1.0.1
  */
 
 export default class CounterModule {
   constructor(messageAPI) {
     this.msg = messageAPI;
-    this.version = '1.0.0';
+    this.version = '1.0.1';
     
     // الحالة الداخلية - معزولة تماماً
     this.counters = new Map();
     this.totalOperations = 0;
+    
+    // حدود لمنع استنزاف الموارد
+    this.limits = {
+      maxCounters: 10000,
+      maxValue: Number.MAX_SAFE_INTEGER,
+      minValue: Number.MIN_SAFE_INTEGER
+    };
     
     this.setupHandlers();
   }
@@ -21,11 +28,33 @@ export default class CounterModule {
     this.msg.on('counter.create', (message) => {
       const { name, initialValue = 0 } = message.data;
       
+      // التحقق من الحد الأقصى للعدادات
+      if (this.counters.size >= this.limits.maxCounters) {
+        if (message.requestId) {
+          this.msg.reply(message.requestId, {
+            success: false,
+            error: `Maximum counters limit reached (${this.limits.maxCounters})`
+          });
+        }
+        return;
+      }
+      
       if (this.counters.has(name)) {
         if (message.requestId) {
           this.msg.reply(message.requestId, {
             success: false,
             error: `Counter ${name} already exists`
+          });
+        }
+        return;
+      }
+      
+      // التحقق من القيمة الأولية
+      if (!this.isValidValue(initialValue)) {
+        if (message.requestId) {
+          this.msg.reply(message.requestId, {
+            success: false,
+            error: 'Initial value out of safe range'
           });
         }
         return;
@@ -64,7 +93,19 @@ export default class CounterModule {
         return;
       }
       
-      counter.value += amount;
+      // التحقق من تجاوز الحدود
+      const newValue = counter.value + amount;
+      if (!this.isValidValue(newValue)) {
+        if (message.requestId) {
+          this.msg.reply(message.requestId, {
+            success: false,
+            error: 'Operation would exceed safe value range'
+          });
+        }
+        return;
+      }
+      
+      counter.value = newValue;
       counter.operations++;
       this.totalOperations++;
       
@@ -98,7 +139,19 @@ export default class CounterModule {
         return;
       }
       
-      counter.value -= amount;
+      // التحقق من تجاوز الحدود
+      const newValue = counter.value - amount;
+      if (!this.isValidValue(newValue)) {
+        if (message.requestId) {
+          this.msg.reply(message.requestId, {
+            success: false,
+            error: 'Operation would exceed safe value range'
+          });
+        }
+        return;
+      }
+      
+      counter.value = newValue;
       counter.operations++;
       this.totalOperations++;
       
@@ -198,11 +251,22 @@ export default class CounterModule {
           result: {
             totalCounters: this.counters.size,
             totalOperations: this.totalOperations,
+            limits: this.limits,
             version: this.version
           }
         });
       }
     });
+  }
+
+  /**
+   * التحقق من صحة القيمة
+   */
+  isValidValue(value) {
+    return typeof value === 'number' && 
+           !isNaN(value) &&
+           value >= this.limits.minValue && 
+           value <= this.limits.maxValue;
   }
 
   // دورة الحياة
@@ -222,9 +286,8 @@ export default class CounterModule {
 
   // فحص الصحة
   async healthCheck() {
-    // الوحدة صحية إذا لم تتجاوز عدد معين من العدادات
-    const MAX_COUNTERS = 10000;
-    return this.counters.size < MAX_COUNTERS;
+    // الوحدة صحية إذا لم تصل للحد الأقصى
+    return this.counters.size < this.limits.maxCounters * 0.9;
   }
 
   // تنظيف

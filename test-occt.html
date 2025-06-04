@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>OpenCASCADE Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background: #1a1a1a;
+            color: white;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            cursor: pointer;
+            background: #3498db;
+            color: white;
+            border: none;
+            border-radius: 5px;
+        }
+        button:hover {
+            background: #2980b9;
+        }
+        button:disabled {
+            background: #555;
+            cursor: not-allowed;
+        }
+        #log {
+            margin-top: 20px;
+            padding: 15px;
+            background: #2c2c2c;
+            border: 1px solid #444;
+            border-radius: 5px;
+            height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 14px;
+        }
+        .success { color: #2ecc71; }
+        .error { color: #e74c3c; }
+        .info { color: #3498db; }
+    </style>
+</head>
+<body>
+    <h1>OpenCASCADE.js Test</h1>
+    
+    <div>
+        <button id="initBtn" onclick="initOCCT()">Initialize OpenCASCADE</button>
+        <button id="testBtn" onclick="testOCCT()" disabled>Test Create Point</button>
+    </div>
+    
+    <div id="log"></div>
+    
+    <script>
+        let worker = null;
+        
+        function log(message, type = 'info') {
+            const logDiv = document.getElementById('log');
+            const time = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = type;
+            entry.textContent = `[${time}] ${message}`;
+            logDiv.appendChild(entry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+            console.log(message);
+        }
+        
+        function initWorker() {
+            log('Creating worker...');
+            worker = new Worker('/workers/occt-worker-simple.js', { type: 'module' });
+            
+            worker.onmessage = (e) => {
+                const { type } = e.data;
+                
+                if (type === 'ready') {
+                    log('✅ OpenCASCADE initialized successfully!', 'success');
+                    document.getElementById('testBtn').disabled = false;
+                    document.getElementById('initBtn').disabled = true;
+                } else if (type === 'error') {
+                    log(`❌ Error: ${e.data.error}`, 'error');
+                } else if (type === 'test-result') {
+                    log(`✅ ${e.data.result}`, 'success');
+                }
+            };
+            
+            worker.onerror = (error) => {
+                log(`❌ Worker error: ${error.message}`, 'error');
+            };
+            
+            log('Worker created');
+        }
+        
+        function initOCCT() {
+            if (!worker) initWorker();
+            
+            log('Initializing OpenCASCADE (this takes 5-10 seconds)...');
+            document.getElementById('initBtn').textContent = 'Loading...';
+            worker.postMessage({ type: 'init' });
+        }
+        
+        function testOCCT() {
+            log('Testing OpenCASCADE - creating a point...');
+            worker.postMessage({ type: 'test' });
+        }
+        
+        // Initialize on load
+        window.onload = () => {
+            log('Page loaded. Click "Initialize OpenCASCADE" to start.');
+        };
+        
+    </script>
+</body>
+</html>

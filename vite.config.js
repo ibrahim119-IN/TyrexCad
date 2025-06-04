@@ -2,11 +2,27 @@ import { defineConfig } from 'vite';
 import { configDefaults } from 'vitest/config';
 
 export default defineConfig({
+  // إعدادات Worker
+  worker: {
+    format: 'es'
+  },
+  
+  // استثناء OpenCASCADE من التحسين
+  optimizeDeps: {
+    exclude: ['opencascade.js']
+  },
+  
+  // Headers لـ SharedArrayBuffer
+  server: {
+    headers: {
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+      'Cross-Origin-Opener-Policy': 'same-origin'
+    }
+  },
+  
+  // إعدادات الاختبار
   test: {
-    // بيئة الاختبار
     environment: 'jsdom',
-    
-    // إعدادات التغطية
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
@@ -16,14 +32,10 @@ export default defineConfig({
         '**/node_modules/**',
       ]
     },
-    
-    // المجلدات المُستبعدة
     exclude: [
       ...configDefaults.exclude,
       'scripts/**',
     ],
-    
-    // إعدادات عامة
     globals: true,
     mockReset: true,
     restoreMocks: true,

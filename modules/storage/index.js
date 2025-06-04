@@ -1,13 +1,10 @@
 /**
  * Storage Module - تجريد التخزين عبر المنصات
- * 
- * يوفر واجهة موحدة للتخزين تعمل على:
- * - Web: localStorage/IndexedDB
- * - Desktop: electron-store/filesystem
- * - Future: cloud storage
+ * @module StorageModule
+ * @version 1.0.1
  */
 
-// Storage Providers - نسخة مبسطة
+// Storage Providers
 class WebStorageProvider {
   constructor() {
     this.type = 'web';
@@ -38,7 +35,7 @@ class WebStorageProvider {
     const keys = [];
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
-      if (key.startsWith(this.prefix + prefix)) {
+      if (key && key.startsWith(this.prefix + prefix)) {
         keys.push(key.replace(this.prefix, ''));
       }
     }
@@ -49,7 +46,7 @@ class WebStorageProvider {
     const keysToRemove = [];
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
-      if (key.startsWith(this.prefix)) {
+      if (key && key.startsWith(this.prefix)) {
         keysToRemove.push(key);
       }
     }
@@ -60,7 +57,6 @@ class WebStorageProvider {
 class ElectronStorageProvider {
   constructor() {
     this.type = 'electron';
-    // Fallback to web storage if Electron not available
     this.fallback = new WebStorageProvider();
   }
 
@@ -100,18 +96,25 @@ class ElectronStorageProvider {
   }
 }
 
-// Main Storage Module
+/**
+ * Storage Module - يوفر واجهة موحدة للتخزين عبر المنصات
+ * @class
+ */
 export default class StorageModule {
+  /**
+   * @param {MessageAPI} messageAPI - واجهة الرسائل
+   */
   constructor(messageAPI) {
     this.msg = messageAPI;
-    this.version = '1.0.0';
+    this.version = '1.0.1';
     
     // كشف المنصة واختيار Provider
     this.provider = this.detectProvider();
     
-    // Cache للأداء
+    // Cache للأداء مع حدود
     this.cache = new Map();
-    this.cacheTimeout = 60000; // 60 ثانية بدلاً من 5
+    this.cacheTimeout = 60000; // 60 ثانية
+    this.maxCacheSize = 1000; // حد أقصى للعناصر
     
     // معلومات التخزين
     this.stats = {
@@ -119,7 +122,8 @@ export default class StorageModule {
       writes: 0,
       deletes: 0,
       cacheHits: 0,
-      cacheMisses: 0
+      cacheMisses: 0,
+      errors: 0
     };
     
     this.setupHandlers();
@@ -132,34 +136,13 @@ export default class StorageModule {
   }
 
   detectProvider() {
-    // كشف Electron
     if (typeof window !== 'undefined' && window.electronAPI) {
       console.log('Storage: Using Electron provider');
       return new ElectronStorageProvider();
     }
     
-    // الافتراضي: Web Storage
     console.log('Storage: Using Web provider');
     return new WebStorageProvider();
-  }
-
-  async initializeProvider() {
-    try {
-      if (this.provider.init) {
-        await this.provider.init();
-      }
-      
-      this.msg.emit('storage.ready', {
-        provider: this.provider.type,
-        version: this.version
-      });
-    } catch (error) {
-      console.error('Storage initialization error:', error);
-      this.msg.emit('storage.error', {
-        type: 'initialization',
-        error: error.message
-      });
-    }
   }
 
   setupHandlers() {
@@ -168,12 +151,12 @@ export default class StorageModule {
       const { key, useCache = true } = message.data;
       
       try {
-        // التحقق من الكاش
-        if (useCache && this.cache.has(key)) {
+        // التحقق من الكاش إذا كان مفعلاً
+        if (useCache === true && this.cache.has(key)) {
           const cached = this.cache.get(key);
           if (Date.now() - cached.time < this.cacheTimeout) {
             this.stats.cacheHits++;
-            this.stats.reads++; // نحسبها كقراءة حتى لو من الكاش
+            this.stats.reads++;
             if (message.requestId) {
               this.msg.reply(message.requestId, {
                 success: true,
@@ -181,6 +164,9 @@ export default class StorageModule {
               });
             }
             return;
+          } else {
+            // حذف من الكاش إذا انتهت صلاحيته
+            this.cache.delete(key);
           }
         }
         
@@ -190,11 +176,8 @@ export default class StorageModule {
         const value = await this.provider.get(key);
         
         // تحديث الكاش
-        if (useCache && value !== undefined) {
-          this.cache.set(key, {
-            value,
-            time: Date.now()
-          });
+        if (useCache !== false && value !== undefined) {
+          this.updateCache(key, value);
         }
         
         if (message.requestId) {
@@ -204,6 +187,7 @@ export default class StorageModule {
           });
         }
       } catch (error) {
+        this.stats.errors++;
         if (message.requestId) {
           this.msg.reply(message.requestId, {
             success: false,
@@ -223,10 +207,7 @@ export default class StorageModule {
         await this.provider.set(key, value);
         
         // تحديث الكاش
-        this.cache.set(key, {
-          value,
-          time: Date.now()
-        });
+        this.updateCache(key, value);
         
         if (message.requestId) {
           this.msg.reply(message.requestId, {
@@ -243,6 +224,7 @@ export default class StorageModule {
           });
         }
       } catch (error) {
+        this.stats.errors++;
         if (message.requestId) {
           this.msg.reply(message.requestId, {
             success: false,
@@ -272,6 +254,7 @@ export default class StorageModule {
         
         this.msg.emit('storage.deleted', { key });
       } catch (error) {
+        this.stats.errors++;
         if (message.requestId) {
           this.msg.reply(message.requestId, {
             success: false,
@@ -295,6 +278,7 @@ export default class StorageModule {
           });
         }
       } catch (error) {
+        this.stats.errors++;
         if (message.requestId) {
           this.msg.reply(message.requestId, {
             success: false,
@@ -322,6 +306,7 @@ export default class StorageModule {
           timestamp: Date.now()
         });
       } catch (error) {
+        this.stats.errors++;
         if (message.requestId) {
           this.msg.reply(message.requestId, {
             success: false,
@@ -340,6 +325,8 @@ export default class StorageModule {
             provider: this.provider.type,
             stats: this.stats,
             cacheSize: this.cache.size,
+            maxCacheSize: this.maxCacheSize,
+            cacheTimeout: this.cacheTimeout,
             version: this.version
           }
         });
@@ -370,6 +357,9 @@ export default class StorageModule {
               await this.provider.delete(op.key);
               results.push({ success: true });
               break;
+              
+            default:
+              throw new Error(`Unknown operation type: ${op.type}`);
           }
         }
         
@@ -384,7 +374,7 @@ export default class StorageModule {
         console.error('Transaction failed, rolling back:', error);
         for (const op of rollback.reverse()) {
           try {
-            if (op.type === 'set') {
+            if (op.type === 'set' && op.value !== undefined) {
               await this.provider.set(op.key, op.value);
             }
           } catch (rollbackError) {
@@ -392,6 +382,7 @@ export default class StorageModule {
           }
         }
         
+        this.stats.errors++;
         if (message.requestId) {
           this.msg.reply(message.requestId, {
             success: false,
@@ -399,6 +390,22 @@ export default class StorageModule {
           });
         }
       }
+    });
+  }
+
+  /**
+   * تحديث الكاش مع إدارة الحجم
+   */
+  updateCache(key, value) {
+    // حذف الأقدم إذا وصلنا للحد الأقصى
+    if (this.cache.size >= this.maxCacheSize) {
+      const firstKey = this.cache.keys().next().value;
+      this.cache.delete(firstKey);
+    }
+    
+    this.cache.set(key, {
+      value,
+      time: Date.now()
     });
   }
 
@@ -414,7 +421,6 @@ export default class StorageModule {
 
   async healthCheck() {
     try {
-      // اختبار بسيط للقراءة/الكتابة
       const testKey = '__health_check__';
       const testValue = Date.now();
       

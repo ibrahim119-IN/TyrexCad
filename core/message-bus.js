@@ -81,6 +81,9 @@ export class MessageBus {
       lastCheck: Date.now(),
       adaptiveMultiplier: 1
     };
+    
+    // Stats cache
+    this._statsCache = null;
   }
 
   /**
@@ -589,7 +592,14 @@ export class MessageBus {
   }
 
   getStats() {
-    const uptime = Date.now() - this.stats.startTime;
+    const now = Date.now();
+    
+    // Cache stats for 100ms
+    if (this._statsCache && now - this._statsCache.time < 100) {
+      return this._statsCache.data;
+    }
+    
+    const uptime = now - this.stats.startTime;
     const messagesPerSecond = this.stats.messagesSent / (uptime / 1000);
     const successRate = this.stats.requestsSent > 0 
       ? (this.stats.requestsCompleted / this.stats.requestsSent * 100).toFixed(2)
@@ -618,7 +628,7 @@ export class MessageBus {
       avgHandlerExecutionTime = avgHandlerExecutionTime / totalHandlers;
     }
     
-    return {
+    const statsData = {
       ...this.stats,
       uptime,
       uptimeHuman: this.formatUptime(uptime),
@@ -648,6 +658,9 @@ export class MessageBus {
       health: this.calculateHealth(),
       mode: this.config.productionMode ? 'production' : 'development'
     };
+    
+    this._statsCache = { data: statsData, time: now };
+    return statsData;
   }
 
   calculateHealth() {
@@ -736,6 +749,9 @@ export class MessageBus {
     if (this.patternCache) {
       this.patternCache.clear();
     }
+    
+    // Clear stats cache
+    this._statsCache = null;
     
     if (this.config.enableLogging) {
       console.log('Message Bus destroyed safely');
