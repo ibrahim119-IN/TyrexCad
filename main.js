@@ -48,6 +48,29 @@ async function initializeTyrexCad() {
     // 3. إنشاء محمل الوحدات
     const moduleLoader = new ModuleLoader(messageBus, lifecycle);
     
+    // في الإنتاج، الوحدات ستُحمل حسب الطلب
+    // في التطوير، نضع helper للاختبار
+    if (import.meta.env.DEV) {
+      window.__tyrexcad = {
+        messageBus,
+        lifecycle,
+        moduleLoader,
+        // للاختبار اليدوي في console
+        emit: (event, data) => messageBus.emit(event, data),
+        on: (event, handler) => messageBus.on(event, handler),
+        request: (event, data) => messageBus.request(event, data),
+        getStats: () => messageBus.getStats(),
+        // helper لتحميل الوحدات
+        loadModule: async (name) => {
+          const module = await import(`./modules/${name}/index.js`);
+          moduleLoader.registerModuleType(name, module.default);
+          return moduleLoader.loadModule(name);
+        }
+      };
+      
+      console.log('💡 Development mode: Access TyrexCad via window.__tyrexcad');
+    }
+    
     // 4. تحميل الوحدات الأساسية بالترتيب الصحيح
     const coreModules = [
       'geometry',    // إدارة الأشكال الهندسية
@@ -72,22 +95,6 @@ async function initializeTyrexCad() {
     });
     
     console.log('✅ TyrexCad initialized successfully!');
-    
-    // حفظ المراجع في window للتطوير فقط (سيُزال في الإنتاج)
-    if (import.meta.env.DEV) {
-      window.__tyrexcad = {
-        messageBus,
-        lifecycle,
-        moduleLoader,
-        // للاختبار اليدوي في console
-        emit: (event, data) => messageBus.emit(event, data),
-        on: (event, handler) => messageBus.on(event, handler),
-        request: (event, data) => messageBus.request(event, data),
-        getStats: () => messageBus.getStats()
-      };
-      
-      console.log('💡 Development mode: Access TyrexCad via window.__tyrexcad');
-    }
     
     // معالجة أخطاء النظام
     messageBus.on('system.error', (message) => {
