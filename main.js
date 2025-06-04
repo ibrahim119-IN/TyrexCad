@@ -14,8 +14,33 @@ async function initializeTyrexCad() {
   try {
     console.log('🚀 Starting TyrexCad initialization...');
     
-    // 1. إنشاء ناقل الرسائل المركزي
-    const messageBus = new MessageBus();
+    // 1. إنشاء ناقل الرسائل المركزي مع إعدادات الإنتاج
+    const messageBusConfig = import.meta.env.PROD 
+      ? MessageBus.getProductionConfig()
+      : {
+          // إعدادات التطوير - أقل صرامة للسماح بالتجريب
+          maxQueueSize: 10000,
+          batchSize: 100,
+          enableLogging: true,
+          productionMode: false,
+          enableBackpressure: true,
+          backpressureThreshold: 0.8
+        };
+    
+    const messageBus = new MessageBus(messageBusConfig);
+    
+    // في وضع التطوير، نظهر إحصائيات الأداء
+    if (import.meta.env.DEV) {
+      setInterval(() => {
+        const stats = messageBus.getStats();
+        console.log('📊 Message Bus Health:', {
+          health: stats.health + '%',
+          messagesPerSecond: stats.messagesPerSecond,
+          queueSizes: stats.queueSizes,
+          pressure: stats.pressure.level
+        });
+      }, 10000); // كل 10 ثواني
+    }
     
     // 2. إنشاء مدير دورة الحياة
     const lifecycle = new LifecycleManager(messageBus);
@@ -42,7 +67,8 @@ async function initializeTyrexCad() {
     // 6. بث رسالة أن النظام جاهز
     messageBus.emit('system.ready', {
       timestamp: Date.now(),
-      modules: coreModules
+      modules: coreModules,
+      mode: import.meta.env.PROD ? 'production' : 'development'
     });
     
     console.log('✅ TyrexCad initialized successfully!');
@@ -56,8 +82,36 @@ async function initializeTyrexCad() {
         // للاختبار اليدوي في console
         emit: (event, data) => messageBus.emit(event, data),
         on: (event, handler) => messageBus.on(event, handler),
+        request: (event, data) => messageBus.request(event, data),
+        getStats: () => messageBus.getStats()
       };
+      
+      console.log('💡 Development mode: Access TyrexCad via window.__tyrexcad');
     }
+    
+    // معالجة أخطاء النظام
+    messageBus.on('system.error', (message) => {
+      console.error('System Error:', message.data);
+      
+      // في الإنتاج، يمكن إرسال الأخطاء لخدمة monitoring
+      if (import.meta.env.PROD) {
+        // TODO: Send to error monitoring service
+      }
+    });
+    
+    // مراقبة الأداء
+    messageBus.on('system.metrics.*', (message) => {
+      if (import.meta.env.DEV) {
+        console.debug('Performance metric:', message.data);
+      }
+    });
+    
+    // معالجة إيقاف التطبيق بشكل آمن
+    window.addEventListener('beforeunload', () => {
+      console.log('🛑 Shutting down TyrexCad...');
+      messageBus.emit('system.shutdown', {}, { priority: 'high' });
+      messageBus.destroy();
+    });
     
   } catch (error) {
     console.error('❌ Failed to initialize TyrexCad:', error);
@@ -65,6 +119,10 @@ async function initializeTyrexCad() {
       <div style="color: #ff4444;">
         <h2>Initialization Failed</h2>
         <p>${error.message}</p>
+        <details style="margin-top: 20px;">
+          <summary>Technical Details</summary>
+          <pre style="text-align: left; font-size: 12px;">${error.stack}</pre>
+        </details>
       </div>
     `;
   }
