@@ -1,46 +1,31 @@
 /**
- * TyrexCad Main Entry Point
+ * TyrexCad Main Entry Point - FIXED
  * 
- * هذا الملف الوحيد الذي يُسمح له بتحميل الـ core
- * كل شيء آخر يتواصل عبر الرسائل فقط!
+ * نسخة مبسطة وصحيحة
  */
 
 import { MessageBus } from './core/message-bus.js';
 import { ModuleLoader } from './core/module-loader.js';
 import { LifecycleManager } from './core/lifecycle.js';
 
-// تهيئة النظام
+// استيراد الوحدات الموجودة فعلاً
+import EchoModule from './modules/echo/index.js';
+import CounterModule from './modules/counter/index.js';
+import StorageModule from './modules/storage/index.js';
+import ResourcesModule from './modules/resources/index.js';
+import ShellModule from './modules/shell/index.js';
+import DesktopFeaturesModule from './modules/desktop-features/index.js';
+
 async function initializeTyrexCad() {
   try {
-    console.log('🚀 Starting TyrexCad initialization...');
+    console.log('🚀 Starting TyrexCad...');
     
-    // 1. إنشاء ناقل الرسائل المركزي مع إعدادات الإنتاج
-    const messageBusConfig = import.meta.env.PROD 
-      ? MessageBus.getProductionConfig()
-      : {
-          // إعدادات التطوير - أقل صرامة للسماح بالتجريب
-          maxQueueSize: 10000,
-          batchSize: 100,
-          enableLogging: true,
-          productionMode: false,
-          enableBackpressure: true,
-          backpressureThreshold: 0.8
-        };
-    
-    const messageBus = new MessageBus(messageBusConfig);
-    
-    // في وضع التطوير، نظهر إحصائيات الأداء
-    if (import.meta.env.DEV) {
-      setInterval(() => {
-        const stats = messageBus.getStats();
-        console.log('📊 Message Bus Health:', {
-          health: stats.health + '%',
-          messagesPerSecond: stats.messagesPerSecond,
-          queueSizes: stats.queueSizes,
-          pressure: stats.pressure.level
-        });
-      }, 10000); // كل 10 ثواني
-    }
+    // 1. إنشاء النظام الأساسي بإعدادات بسيطة
+    const messageBus = new MessageBus({
+      enableLogging: import.meta.env.DEV,
+      enablePriorityQueue: false, // نبدأ بسيط
+      productionMode: import.meta.env.PROD
+    });
     
     // 2. إنشاء مدير دورة الحياة
     const lifecycle = new LifecycleManager(messageBus);
@@ -48,94 +33,90 @@ async function initializeTyrexCad() {
     // 3. إنشاء محمل الوحدات
     const moduleLoader = new ModuleLoader(messageBus, lifecycle);
     
-    // في الإنتاج، الوحدات ستُحمل حسب الطلب
-    // في التطوير، نضع helper للاختبار
-    if (import.meta.env.DEV) {
-      window.__tyrexcad = {
-        messageBus,
-        lifecycle,
-        moduleLoader,
-        // للاختبار اليدوي في console
-        emit: (event, data) => messageBus.emit(event, data),
-        on: (event, handler) => messageBus.on(event, handler),
-        request: (event, data) => messageBus.request(event, data),
-        getStats: () => messageBus.getStats(),
-        // helper لتحميل الوحدات
-        loadModule: async (name) => {
-          const module = await import(`./modules/${name}/index.js`);
-          moduleLoader.registerModuleType(name, module.default);
-          return moduleLoader.loadModule(name);
-        }
-      };
-      
-      console.log('💡 Development mode: Access TyrexCad via window.__tyrexcad');
-    }
+    // 4. تسجيل الوحدات الموجودة
+    moduleLoader.registerModuleType('echo', EchoModule);
+    moduleLoader.registerModuleType('counter', CounterModule);
+    moduleLoader.registerModuleType('storage', StorageModule);
+    moduleLoader.registerModuleType('resources', ResourcesModule);
+    moduleLoader.registerModuleType('shell', ShellModule);
+    moduleLoader.registerModuleType('desktop-features', DesktopFeaturesModule);
     
-    // 4. تحميل الوحدات الأساسية بالترتيب الصحيح
-    const coreModules = [
-      'geometry',    // إدارة الأشكال الهندسية
-      'viewport',    // العرض ثلاثي الأبعاد
-      'state',       // إدارة حالة التطبيق
-      // سنضيف المزيد لاحقاً
-    ];
-    
+    // 5. تحميل الوحدات الأساسية
     console.log('📦 Loading core modules...');
-    for (const moduleName of coreModules) {
-      await moduleLoader.loadModule(moduleName);
+    
+    // Storage أولاً - مطلوب للوحدات الأخرى
+    await moduleLoader.loadModule('storage');
+    
+    // Resources بعد Storage
+    await moduleLoader.loadModule('resources');
+    
+    // Shell UI
+    await moduleLoader.loadModule('shell');
+    
+    // Desktop features إذا كان متاحاً
+    await moduleLoader.loadModule('desktop-features');
+    
+    // وحدات demo للاختبار
+    if (import.meta.env.DEV) {
+      await moduleLoader.loadModule('echo');
+      await moduleLoader.loadModule('counter');
     }
     
-    // 5. إخفاء شاشة التحميل
-    document.getElementById('loading').style.display = 'none';
+    // 6. إخفاء شاشة التحميل
+    const loadingEl = document.getElementById('loading');
+    if (loadingEl) {
+      loadingEl.style.display = 'none';
+    }
     
-    // 6. بث رسالة أن النظام جاهز
+    // 7. بث رسالة أن النظام جاهز
     messageBus.emit('system.ready', {
       timestamp: Date.now(),
-      modules: coreModules,
+      modules: moduleLoader.getLoadedModules(),
       mode: import.meta.env.PROD ? 'production' : 'development'
     });
     
     console.log('✅ TyrexCad initialized successfully!');
     
-    // معالجة أخطاء النظام
-    messageBus.on('system.error', (message) => {
-      console.error('System Error:', message.data);
+    // في وضع التطوير، نضع helper للاختبار
+    if (import.meta.env.DEV) {
+      window.__tyrexcad = {
+        messageBus,
+        lifecycle,
+        moduleLoader,
+        // اختصارات مفيدة
+        emit: (event, data) => messageBus.emit(event, data),
+        on: (event, handler) => messageBus.on(event, handler),
+        request: (event, data) => messageBus.request(event, data),
+        getStats: () => messageBus.getStats(),
+        loadedModules: () => moduleLoader.getLoadedModules()
+      };
       
-      // في الإنتاج، يمكن إرسال الأخطاء لخدمة monitoring
-      if (import.meta.env.PROD) {
-        // TODO: Send to error monitoring service
-      }
-    });
+      console.log('💡 Dev mode: Use window.__tyrexcad');
+    }
     
-    // مراقبة الأداء
-    messageBus.on('system.metrics.*', (message) => {
-      if (import.meta.env.DEV) {
-        console.debug('Performance metric:', message.data);
-      }
-    });
-    
-    // معالجة إيقاف التطبيق بشكل آمن
+    // معالجة إيقاف التطبيق
     window.addEventListener('beforeunload', () => {
-      console.log('🛑 Shutting down TyrexCad...');
-      messageBus.emit('system.shutdown', {}, { priority: 'high' });
+      lifecycle.shutdown();
       messageBus.destroy();
     });
     
   } catch (error) {
     console.error('❌ Failed to initialize TyrexCad:', error);
-    document.getElementById('loading').innerHTML = `
-      <div style="color: #ff4444;">
-        <h2>Initialization Failed</h2>
-        <p>${error.message}</p>
-        <details style="margin-top: 20px;">
-          <summary>Technical Details</summary>
-          <pre style="text-align: left; font-size: 12px;">${error.stack}</pre>
-        </details>
-      </div>
-    `;
+    
+    // عرض الخطأ للمستخدم
+    const loadingEl = document.getElementById('loading');
+    if (loadingEl) {
+      loadingEl.innerHTML = `
+        <div style="color: #ff4444;">
+          <h2>Initialization Failed</h2>
+          <p>${error.message}</p>
+        </div>
+      `;
+    }
   }
 }
 
-// بدء التهيئة عند تحميل الصفحة
+// بدء التطبيق
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', initializeTyrexCad);
 } else {
