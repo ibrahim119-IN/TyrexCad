@@ -39,8 +39,7 @@ build
 dist
 
 # WASM files
-public/wasm/*.wasm
-public/wasm/*.js
+
 !public/wasm/.gitkeep
 
 # Desktop builds

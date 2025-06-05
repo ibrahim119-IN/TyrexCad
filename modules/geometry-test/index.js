@@ -47,10 +47,7 @@ export default class GeometryTestModule {
       }
       
       try {
-        const result = await this.msg.request('occt.executeOperation', {
-          operation: 'createBox',
-          params: message.data
-        });
+        const result = await this.msg.request('occt.createBox', message.data);
         
         const id = `shape_${this.shapeCounter++}`;
         this.shapes.set(id, result);
@@ -93,10 +90,7 @@ export default class GeometryTestModule {
       }
       
       try {
-        const result = await this.msg.request('occt.executeOperation', {
-          operation: 'createSphere',
-          params: message.data
-        });
+        const result = await this.msg.request('occt.createSphere', message.data);
         
         const id = `shape_${this.shapeCounter++}`;
         this.shapes.set(id, result);
@@ -139,10 +133,7 @@ export default class GeometryTestModule {
       }
       
       try {
-        const result = await this.msg.request('occt.executeOperation', {
-          operation: 'createCylinder',
-          params: message.data
-        });
+        const result = await this.msg.request('occt.createCylinder', message.data);
         
         const id = `shape_${this.shapeCounter++}`;
         this.shapes.set(id, result);
@@ -214,13 +205,10 @@ export default class GeometryTestModule {
       }
       
       try {
-        const result = await this.msg.request('occt.executeOperation', {
-          operation: 'boolean',
-          params: {
-            operation,
-            shape1: shape1.geometry,
-            shape2: shape2.geometry
-          }
+        const result = await this.msg.request('occt.boolean', {
+          operation,
+          shape1: shape1.shapeId,
+          shape2: shape2.shapeId
         });
         
         const id = `shape_${this.shapeCounter++}`;
@@ -283,12 +271,9 @@ export default class GeometryTestModule {
       }
       
       try {
-        const mesh = await this.msg.request('occt.executeOperation', {
-          operation: 'toMesh',
-          params: {
-            shape: shape.geometry,
-            quality
-          }
+        const mesh = await this.msg.request('occt.toMesh', {
+          shapeId: shape.shapeId,
+          quality
         });
         
         // تحديث عدد العمليات
@@ -344,7 +329,7 @@ export default class GeometryTestModule {
     // معلومات OCCT
     this.msg.on('geometry-test.occtInfo', async (message) => {
       try {
-        const info = await this.msg.request('occt.info');
+        const info = await this.msg.request('occt.getWorkerStatus');
         
         if (message.requestId) {
           this.msg.reply(message.requestId, {
@@ -377,6 +362,13 @@ export default class GeometryTestModule {
       }
       
       try {
+        const shape = this.shapes.get(shapeId);
+        
+        // إطلاق موارد OCCT
+        if (shape.shapeId) {
+          await this.msg.emit('occt.release', { id: shape.shapeId });
+        }
+        
         // حذف الشكل
         this.shapes.delete(shapeId);
         this.shapeOperations.delete(shapeId);
@@ -406,6 +398,14 @@ export default class GeometryTestModule {
     this.msg.on('geometry-test.clearAll', async (message) => {
       try {
         const count = this.shapes.size;
+        
+        // إطلاق موارد OCCT لجميع الأشكال
+        for (const [id, shape] of this.shapes) {
+          if (shape.shapeId) {
+            await this.msg.emit('occt.release', { id: shape.shapeId });
+          }
+        }
+        
         this.shapes.clear();
         this.shapeOperations.clear();
         this.shapeCounter = 0;
@@ -491,6 +491,13 @@ export default class GeometryTestModule {
   }
 
   async stop() {
+    // إطلاق موارد OCCT قبل الإيقاف
+    for (const [id, shape] of this.shapes) {
+      if (shape.shapeId) {
+        await this.msg.emit('occt.release', { id: shape.shapeId });
+      }
+    }
+    
     this.shapes.clear();
     this.shapeOperations.clear();
   }

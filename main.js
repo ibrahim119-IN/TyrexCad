@@ -7,7 +7,7 @@
 import { MessageBus } from './core/message-bus.js';
 import { ModuleLoader } from './core/module-loader.js';
 import { LifecycleManager } from './core/lifecycle.js';
-import { OCCTBridge } from './core/occt-bridge.js';
+import { SecurityManager } from './core/security.js';
 
 // استيراد الوحدات الموجودة
 import EchoModule from './modules/echo/index.js';
@@ -16,6 +16,7 @@ import StorageModule from './modules/storage/index.js';
 import ResourcesModule from './modules/resources/index.js';
 import ShellModule from './modules/shell/index.js';
 import DesktopFeaturesModule from './modules/desktop-features/index.js';
+import OCCTModule from './modules/occt/index.js';
 
 async function initializeTyrexCad() {
   try {
@@ -31,8 +32,8 @@ async function initializeTyrexCad() {
     // 2. إنشاء مدير دورة الحياة
     const lifecycle = new LifecycleManager(messageBus);
     
-    // 3. إنشاء OCCT Bridge
-    const occtBridge = new OCCTBridge(messageBus);
+    // 3. إنشاء Security Manager
+    const securityManager = new SecurityManager(messageBus);
     
     // 4. إنشاء محمل الوحدات
     const moduleLoader = new ModuleLoader(messageBus, lifecycle);
@@ -44,6 +45,7 @@ async function initializeTyrexCad() {
     moduleLoader.registerModuleType('resources', ResourcesModule);
     moduleLoader.registerModuleType('shell', ShellModule);
     moduleLoader.registerModuleType('desktop-features', DesktopFeaturesModule);
+    moduleLoader.registerModuleType('occt', OCCTModule);
     
     // 6. تحميل الوحدات الأساسية بالترتيب الصحيح
     console.log('📦 Loading core modules...');
@@ -54,10 +56,14 @@ async function initializeTyrexCad() {
     // Resources بعد Storage
     await moduleLoader.loadModule('resources');
     
-    // تهيئة OCCT بعد Resources
-    console.log('🔧 Initializing OCCT Bridge...');
-    await occtBridge.initialize();
-    console.log('✅ OCCT Bridge initialized');
+    // تحميل OCCT module
+    await moduleLoader.loadModule('occt');
+
+    // انتظار الجاهزية
+    await new Promise((resolve) => {
+      messageBus.once('occt.ready', resolve);
+    });
+    console.log('✅ OCCT module ready');
     
     // Shell UI
     await moduleLoader.loadModule('shell');
@@ -93,7 +99,7 @@ async function initializeTyrexCad() {
         messageBus,
         lifecycle,
         moduleLoader,
-        occtBridge,
+        securityManager,
         // اختصارات مفيدة
         emit: (event, data) => messageBus.emit(event, data),
         on: (event, handler) => messageBus.on(event, handler),
@@ -107,8 +113,8 @@ async function initializeTyrexCad() {
     
     // معالجة إيقاف التطبيق
     window.addEventListener('beforeunload', async () => {
-      await occtBridge.shutdown();
       await lifecycle.shutdown();
+      securityManager.cleanup();
       messageBus.destroy();
     });
     
