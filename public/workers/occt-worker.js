@@ -96,48 +96,199 @@ function stopMemoryManagement() {
 }
 
 /**
- * تهيئة OpenCASCADE
+ * تهيئة OpenCASCADE - محسّنة
  */
 async function initializeOCCT(wasmUrl, jsUrl) {
   try {
     self.postMessage({
       type: 'log',
-      result: 'Initializing OpenCASCADE...'
+      result: `Initializing OpenCASCADE from: ${jsUrl}`
     });
     
-    // تحميل OpenCASCADE بطريقة مختلفة
-    // استخدام fetch و eval للتوافق مع Vite
+    // تحميل OpenCASCADE module
     const response = await fetch(jsUrl);
-    const scriptText = await response.text();
     
-    // إنشاء wrapper function
-    const wrapperFunction = new Function('self', scriptText + '\n return Module;');
-    const Module = wrapperFunction(self);
-    
-    // تهيئة OpenCASCADE
-    if (Module && Module.initOpenCascade) {
-      occt = await Module.initOpenCascade({
-        locateFile: (file) => {
-          if (file.endsWith('.wasm')) {
-            return wasmUrl;
-          }
-          return file;
-        }
-      });
-    } else if (typeof Module !== 'undefined') {
-      // طريقة بديلة
-      occt = await new Promise((resolve) => {
-        Module.onRuntimeInitialized = () => {
-          resolve(Module);
-        };
-      });
-    } else {
-      throw new Error('Could not initialize OpenCASCADE module');
+    if (!response.ok) {
+      throw new Error(`Failed to fetch OpenCASCADE JS: ${response.status} ${response.statusText}`);
     }
     
-    // التحقق من التهيئة
-    if (!occt || !occt.BRepPrimAPI_MakeBox) {
-      throw new Error('OpenCASCADE initialization incomplete');
+    const scriptText = await response.text();
+    
+    // التحقق من المحتوى
+    if (scriptText.includes('<!DOCTYPE') || scriptText.includes('<html')) {
+      throw new Error('Received HTML instead of JavaScript. Check file path.');
+    }
+    
+    // إنشاء module configuration
+    self.Module = {
+      locateFile: (filename) => {
+        self.postMessage({
+          type: 'log',
+          result: `Locating file: ${filename}`
+        });
+        
+        if (filename.endsWith('.wasm')) {
+          return wasmUrl;
+        }
+        return filename;
+      },
+      instantiateWasm: (imports, successCallback) => {
+        self.postMessage({
+          type: 'log',
+          result: `Loading WASM from: ${wasmUrl}`
+        });
+        
+        // محاولة التحميل المباشر أولاً
+        WebAssembly.instantiateStreaming(fetch(wasmUrl), imports)
+          .then(result => {
+            self.postMessage({
+              type: 'log',
+              result: 'WASM loaded successfully via streaming'
+            });
+            successCallback(result.instance, result.module);
+          })
+          .catch(streamingError => {
+            console.warn('Streaming failed, trying arrayBuffer method:', streamingError);
+            self.postMessage({
+              type: 'log',
+              result: 'WASM streaming failed, trying fallback method...'
+            });
+            
+            // Fallback to non-streaming
+            fetch(wasmUrl)
+              .then(response => {
+                if (!response.ok) {
+                  throw new Error(`Failed to fetch WASM: ${response.status} ${response.statusText}`);
+                }
+                return response.arrayBuffer();
+              })
+              .then(bytes => {
+                self.postMessage({
+                  type: 'log',
+                  result: `WASM file loaded, size: ${(bytes.byteLength / 1024 / 1024).toFixed(2)} MB`
+                });
+                return WebAssembly.instantiate(bytes, imports);
+              })
+              .then(result => {
+                self.postMessage({
+                  type: 'log',
+                  result: 'WASM instantiated successfully'
+                });
+                successCallback(result.instance, result.module);
+              })
+              .catch(err => {
+                throw new Error(`Failed to load WASM: ${err.message}`);
+              });
+          });
+        return {};
+      },
+      onRuntimeInitialized: function() {
+        self.postMessage({
+          type: 'log',
+          result: 'OpenCASCADE runtime initialized'
+        });
+      },
+      print: (text) => {
+        console.log('OpenCASCADE:', text);
+      },
+      printErr: (text) => {
+        console.error('OpenCASCADE Error:', text);
+      }
+    };
+    
+    // تحميل السكريبت
+    try {
+      self.postMessage({
+        type: 'log',
+        result: 'Evaluating OpenCASCADE script...'
+      });
+      
+      // استخدام Function بدلاً من eval للأمان
+      const moduleFunction = new Function('Module', scriptText + '\nreturn Module;');
+      const evaluatedModule = moduleFunction(self.Module);
+      
+      if (evaluatedModule) {
+        self.Module = evaluatedModule;
+      }
+      
+    } catch (evalError) {
+      throw new Error(`Failed to evaluate OpenCASCADE script: ${evalError.message}`);
+    }
+    
+    // انتظار التهيئة
+    self.postMessage({
+      type: 'log',
+      result: 'Waiting for OpenCASCADE initialization...'
+    });
+    
+    if (self.Module && typeof self.Module.then === 'function') {
+      // Module is a promise
+      occt = await self.Module;
+      self.postMessage({
+        type: 'log',
+        result: 'OpenCASCADE loaded from promise'
+      });
+    } else if (self.Module) {
+      // Module needs manual initialization
+      occt = await new Promise((resolve, reject) => {
+        let checkCount = 0;
+        const maxChecks = 300; // 30 seconds with 100ms intervals
+        
+        const checkInterval = setInterval(() => {
+          checkCount++;
+          
+          // طرق مختلفة للتحقق من الجاهزية
+          if (self.Module.calledRun || 
+              (self.Module.asm && self.Module.asm.BRepPrimAPI_MakeBox) ||
+              (self.Module._BRepPrimAPI_MakeBox_ctor)) {
+            clearInterval(checkInterval);
+            resolve(self.Module);
+          } else if (checkCount >= maxChecks) {
+            clearInterval(checkInterval);
+            reject(new Error('OpenCASCADE initialization timeout after 30 seconds'));
+          }
+          
+          // كل 10 محاولات، نطبع حالة
+          if (checkCount % 10 === 0) {
+            self.postMessage({
+              type: 'log',
+              result: `Still waiting for initialization... (${checkCount / 10}s)`
+            });
+          }
+        }, 100);
+      });
+    } else {
+      throw new Error('Module not found after script evaluation');
+    }
+    
+    // التحقق من التهيئة بطرق مختلفة
+    let makeBoxAvailable = false;
+    
+    // طريقة 1: التحقق المباشر
+    if (occt.BRepPrimAPI_MakeBox) {
+      makeBoxAvailable = true;
+    }
+    // طريقة 2: التحقق من asm
+    else if (occt.asm && occt.asm.BRepPrimAPI_MakeBox) {
+      makeBoxAvailable = true;
+    }
+    // طريقة 3: التحقق من الدوال المصدرة
+    else if (occt._BRepPrimAPI_MakeBox_ctor) {
+      makeBoxAvailable = true;
+    }
+    
+    if (!makeBoxAvailable) {
+      // طباعة الخصائص المتاحة للتشخيص
+      const availableProps = Object.keys(occt).filter(key => 
+        key.includes('BRep') || key.includes('Make') || key.includes('Box')
+      );
+      
+      self.postMessage({
+        type: 'log',
+        result: `Available BRep-related properties: ${availableProps.join(', ')}`
+      });
+      
+      throw new Error('OpenCASCADE initialization incomplete - BRepPrimAPI_MakeBox not found');
     }
     
     initialized = true;
@@ -207,6 +358,9 @@ async function executeOperation(operation, params) {
     case 'revolve':
       return revolveProfile(params);
       
+    case 'release':
+      return releaseShape(params);
+      
     default:
       throw new Error(`Unknown operation: ${operation}`);
   }
@@ -220,8 +374,22 @@ function createBox(params) {
   
   let box;
   try {
-    // إنشاء الصندوق
-    const makeBox = new occt.BRepPrimAPI_MakeBox(width, height, depth);
+    // إنشاء الصندوق - التحقق من الطريقة المتاحة
+    let makeBox;
+    
+    if (occt.BRepPrimAPI_MakeBox) {
+      makeBox = new occt.BRepPrimAPI_MakeBox(width, height, depth);
+    } else if (occt.asm && occt.asm.BRepPrimAPI_MakeBox) {
+      // استخدام asm interface
+      const makeBoxPtr = occt.asm.BRepPrimAPI_MakeBox(width, height, depth);
+      makeBox = { 
+        Shape: () => occt.wrapPointer(makeBoxPtr, occt.TopoDS_Shape),
+        delete: () => occt._free(makeBoxPtr)
+      };
+    } else {
+      throw new Error('BRepPrimAPI_MakeBox not available');
+    }
+    
     const shape = makeBox.Shape();
     makeBox.delete();
     
@@ -264,7 +432,7 @@ function createBox(params) {
     };
     
   } catch (error) {
-    if (box) box.delete();
+    if (box && box.delete) box.delete();
     throw new Error(`Failed to create box: ${error.message}`);
   }
 }
@@ -280,8 +448,55 @@ function createSphere(params) {
     // إنشاء نقطة المركز
     const centerPnt = new occt.gp_Pnt(center[0], center[1], center[2]);
     
-    // إنشاء الكرة
-    const makeSphere = new occt.BRepPrimAPI_MakeSphere_1(centerPnt, radius);
+    // إنشاء الكرة - التحقق من الطريقة المتاحة
+    let makeSphere;
+    if (occt.BRepPrimAPI_MakeSphere_1) {
+      makeSphere = new occt.BRepPrimAPI_MakeSphere_1(centerPnt, radius);
+    } else if (occt.BRepPrimAPI_MakeSphere) {
+      makeSphere = new occt.BRepPrimAPI_MakeSphere(centerPnt, radius);
+    } else {
+      // طريقة بديلة
+      makeSphere = new occt.BRepPrimAPI_MakeSphere(radius);
+      // نحتاج لنقل الكرة للمركز المطلوب
+      const shape = makeSphere.Shape();
+      makeSphere.delete();
+      
+      if (center[0] !== 0 || center[1] !== 0 || center[2] !== 0) {
+        const trsf = new occt.gp_Trsf();
+        const vec = new occt.gp_Vec(center[0], center[1], center[2]);
+        trsf.SetTranslation(vec);
+        
+        const transform = new occt.BRepBuilderAPI_Transform(shape, trsf, true);
+        sphere = transform.Shape();
+        
+        shape.delete();
+        trsf.delete();
+        vec.delete();
+        transform.delete();
+      } else {
+        sphere = shape;
+      }
+      
+      centerPnt.delete();
+      
+      // ننتقل مباشرة للتسلسل
+      const serialized = serializeShape(sphere);
+      sphere.delete();
+      
+      return {
+        type: 'shape',
+        geometry: serialized,
+        properties: {
+          volume: (4/3) * Math.PI * Math.pow(radius, 3),
+          surfaceArea: 4 * Math.PI * Math.pow(radius, 2),
+          bounds: {
+            min: [center[0] - radius, center[1] - radius, center[2] - radius],
+            max: [center[0] + radius, center[1] + radius, center[2] + radius]
+          }
+        }
+      };
+    }
+    
     sphere = makeSphere.Shape();
     
     // تنظيف
@@ -311,7 +526,7 @@ function createSphere(params) {
     };
     
   } catch (error) {
-    if (sphere) sphere.delete();
+    if (sphere && sphere.delete) sphere.delete();
     throw new Error(`Failed to create sphere: ${error.message}`);
   }
 }
@@ -324,8 +539,17 @@ function createCylinder(params) {
   
   let cylinder;
   try {
-    // إنشاء الأسطوانة
-    const makeCylinder = new occt.BRepPrimAPI_MakeCylinder_1(radius, height);
+    // إنشاء الأسطوانة - التحقق من الطريقة المتاحة
+    let makeCylinder;
+    
+    if (occt.BRepPrimAPI_MakeCylinder_1) {
+      makeCylinder = new occt.BRepPrimAPI_MakeCylinder_1(radius, height);
+    } else if (occt.BRepPrimAPI_MakeCylinder) {
+      makeCylinder = new occt.BRepPrimAPI_MakeCylinder(radius, height);
+    } else {
+      throw new Error('BRepPrimAPI_MakeCylinder not available');
+    }
+    
     cylinder = makeCylinder.Shape();
     makeCylinder.delete();
     
@@ -371,7 +595,7 @@ function createCylinder(params) {
     };
     
   } catch (error) {
-    if (cylinder) cylinder.delete();
+    if (cylinder && cylinder.delete) cylinder.delete();
     throw new Error(`Failed to create cylinder: ${error.message}`);
   }
 }
@@ -442,18 +666,28 @@ function createTorus(params) {
   let torus = null;
   try {
     // إنشاء محور ونقطة للحلقة
-    const ax2 = new occt.gp_Ax2(
-      new occt.gp_Pnt(center[0], center[1], center[2]),
-      new occt.gp_Dir(0, 0, 1)
-    );
+    const centerPnt = new occt.gp_Pnt(center[0], center[1], center[2]);
+    const dir = new occt.gp_Dir(0, 0, 1);
+    const ax2 = new occt.gp_Ax2(centerPnt, dir);
     
-    // إنشاء الحلقة
-    const makeTorus = new occt.BRepPrimAPI_MakeTorus_1(ax2, majorRadius, minorRadius);
+    // إنشاء الحلقة - التحقق من الطريقة المتاحة
+    let makeTorus;
+    if (occt.BRepPrimAPI_MakeTorus_1) {
+      makeTorus = new occt.BRepPrimAPI_MakeTorus_1(ax2, majorRadius, minorRadius);
+    } else if (occt.BRepPrimAPI_MakeTorus) {
+      makeTorus = new occt.BRepPrimAPI_MakeTorus(ax2, majorRadius, minorRadius);
+    } else {
+      // طريقة بديلة
+      makeTorus = new occt.BRepPrimAPI_MakeTorus(majorRadius, minorRadius);
+    }
+    
     torus = makeTorus.Shape();
     
     // تنظيف
     makeTorus.delete();
     ax2.delete();
+    dir.delete();
+    centerPnt.delete();
     
     // تحويل لتنسيق قابل للنقل
     const serialized = serializeShape(torus);
@@ -537,9 +771,9 @@ function performBoolean(params) {
     };
     
   } catch (error) {
-    if (s1) s1.delete();
-    if (s2) s2.delete();
-    if (result) result.delete();
+    if (s1 && s1.delete) s1.delete();
+    if (s2 && s2.delete) s2.delete();
+    if (result && result.delete) result.delete();
     throw new Error(`Boolean operation failed: ${error.message}`);
   }
 }
@@ -568,7 +802,11 @@ function convertToMesh(params) {
     
     // إنشاء mesh
     mesh = new occt.BRepMesh_IncrementalMesh(s, meshQuality, false, 0.5, true);
-    mesh.Perform();
+    
+    // التحقق من الطريقة المتاحة
+    if (mesh.Perform) {
+      mesh.Perform();
+    }
     
     // المصفوفات للبيانات
     const vertices = [];
@@ -658,8 +896,8 @@ function convertToMesh(params) {
     };
     
   } catch (error) {
-    if (mesh) mesh.delete();
-    if (s) s.delete();
+    if (mesh && mesh.delete) mesh.delete();
+    if (s && s.delete) s.delete();
     throw new Error(`Mesh conversion failed: ${error.message}`);
   }
 }
@@ -737,69 +975,86 @@ function calculateRealNormals(vertices, indices, normals) {
  */
 function serializeShape(shape) {
   try {
-    const writer = new occt.BRepTools();
-    const os = new occt.OS_Stream();
-    
-    occt.BRepTools.Write(shape, os);
-    const data = os.str();
-    
-    writer.delete();
-    os.delete();
-    
-    return {
-      type: 'brep',
-      data: data,
-      bounds: extractBounds(shape)
-    };
+    // طريقة 1: استخدام BRepTools
+    if (occt.BRepTools && occt.OS_Stream) {
+      const writer = new occt.BRepTools();
+      const os = new occt.OS_Stream();
+      
+      occt.BRepTools.Write(shape, os);
+      const data = os.str();
+      
+      writer.delete();
+      os.delete();
+      
+      return {
+        type: 'brep',
+        data: data,
+        bounds: extractBounds(shape)
+      };
+    }
   } catch (error) {
-    // Fallback method إذا فشلت الطريقة الأساسية
-    console.warn('BRep serialization failed, using fallback method');
-    return fallbackSerialize(shape);
+    console.warn('BRep serialization failed:', error);
   }
+  
+  // Fallback method
+  return fallbackSerialize(shape);
 }
 
 /**
  * إعادة بناء الشكل من التسلسل - محسّن وآمن
  */
 function deserializeShape(serialized) {
-  if (!serialized || serialized.type !== 'brep') {
-    throw new Error('Invalid serialized shape');
+  if (!serialized) {
+    throw new Error('No serialized shape provided');
   }
   
-  try {
-    const builder = new occt.BRep_Builder();
-    const shape = new occt.TopoDS_Shape();
-    const is = new occt.IS_Stream(serialized.data);
-    
-    occt.BRepTools.Read(shape, is, builder);
-    
-    builder.delete();
-    is.delete();
-    
-    return shape;
-  } catch (error) {
-    // Fallback method
-    console.warn('BRep deserialization failed, using fallback method');
-    return fallbackDeserialize(serialized);
+  if (serialized.type === 'brep') {
+    try {
+      if (occt.BRep_Builder && occt.TopoDS_Shape && occt.IS_Stream && occt.BRepTools) {
+        const builder = new occt.BRep_Builder();
+        const shape = new occt.TopoDS_Shape();
+        const is = new occt.IS_Stream(serialized.data);
+        
+        occt.BRepTools.Read(shape, is, builder);
+        
+        builder.delete();
+        is.delete();
+        
+        return shape;
+      }
+    } catch (error) {
+      console.warn('BRep deserialization failed:', error);
+    }
   }
+  
+  // Fallback method
+  return fallbackDeserialize(serialized);
 }
 
 /**
  * استخراج حدود الشكل
  */
 function extractBounds(shape) {
-  const bbox = new occt.Bnd_Box();
-  occt.BRepBndLib.Add(shape, bbox, false);
-  
-  let xmin = 0, ymin = 0, zmin = 0, xmax = 0, ymax = 0, zmax = 0;
-  bbox.Get(xmin, ymin, zmin, xmax, ymax, zmax);
-  
-  bbox.delete();
-  
-  return {
-    min: [xmin, ymin, zmin],
-    max: [xmax, ymax, zmax]
-  };
+  try {
+    const bbox = new occt.Bnd_Box();
+    occt.BRepBndLib.Add(shape, bbox, false);
+    
+    let xmin = 0, ymin = 0, zmin = 0, xmax = 0, ymax = 0, zmax = 0;
+    bbox.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+    
+    bbox.delete();
+    
+    return {
+      min: [xmin, ymin, zmin],
+      max: [xmax, ymax, zmax]
+    };
+  } catch (error) {
+    console.warn('Failed to extract bounds:', error);
+    return {
+      min: [-100, -100, -100],
+      max: [100, 100, 100]
+    };
+  }
 }
 
 /**
@@ -807,39 +1062,46 @@ function extractBounds(shape) {
  */
 function fallbackSerialize(shape) {
   // طريقة بديلة باستخدام mesh
-  const mesh = new occt.BRepMesh_IncrementalMesh(shape, 0.1, false, 0.5, true);
-  mesh.Perform();
-  
-  const bounds = extractBounds(shape);
-  
-  mesh.delete();
-  
-  // نحتفظ بمرجع مؤقت
-  const id = `shape_${Date.now()}_${Math.random()}`;
-  if (!self._shapeCache) {
-    self._shapeCache = new Map();
+  try {
+    const mesh = new occt.BRepMesh_IncrementalMesh(shape, 0.1, false, 0.5, true);
+    if (mesh.Perform) {
+      mesh.Perform();
+    }
+    
+    const bounds = extractBounds(shape);
+    
+    mesh.delete();
+    
+    // نحتفظ بمرجع مؤقت
+    const id = `shape_${Date.now()}_${Math.random()}`;
+    if (!self._shapeCache) {
+      self._shapeCache = new Map();
+    }
+    
+    // حد أقصى لعدد الأشكال في الكاش
+    if (self._shapeCache.size > 100) {
+      // حذف أقدم 50 شكل
+      const keys = Array.from(self._shapeCache.keys()).slice(0, 50);
+      keys.forEach(key => {
+        const oldShape = self._shapeCache.get(key);
+        if (oldShape && oldShape.delete) {
+          oldShape.delete();
+        }
+        self._shapeCache.delete(key);
+      });
+    }
+    
+    self._shapeCache.set(id, shape);
+    
+    return {
+      type: 'fallback',
+      _tempId: id,
+      bounds: bounds
+    };
+  } catch (error) {
+    console.error('Fallback serialization failed:', error);
+    throw new Error('Failed to serialize shape');
   }
-  
-  // حد أقصى لعدد الأشكال في الكاش
-  if (self._shapeCache.size > 100) {
-    // حذف أقدم 50 شكل
-    const keys = Array.from(self._shapeCache.keys()).slice(0, 50);
-    keys.forEach(key => {
-      const oldShape = self._shapeCache.get(key);
-      if (oldShape && oldShape.delete) {
-        oldShape.delete();
-      }
-      self._shapeCache.delete(key);
-    });
-  }
-  
-  self._shapeCache.set(id, shape);
-  
-  return {
-    type: 'fallback',
-    _tempId: id,
-    bounds: bounds
-  };
 }
 
 /**
@@ -862,39 +1124,44 @@ function validateShapeComplexity(shape) {
   let faceCount = 0;
   let edgeCount = 0;
   
-  // عد الرؤوس
-  const vertexExplorer = new occt.TopExp_Explorer(shape, occt.TopAbs_VERTEX);
-  while (vertexExplorer.More()) {
-    vertexCount++;
-    vertexExplorer.Next();
-  }
-  vertexExplorer.delete();
-  
-  // عد الوجوه
-  const faceExplorer = new occt.TopExp_Explorer(shape, occt.TopAbs_FACE);
-  while (faceExplorer.More()) {
-    faceCount++;
-    faceExplorer.Next();
-  }
-  faceExplorer.delete();
-  
-  // عد الحواف
-  const edgeExplorer = new occt.TopExp_Explorer(shape, occt.TopAbs_EDGE);
-  while (edgeExplorer.More()) {
-    edgeCount++;
-    edgeExplorer.Next();
-  }
-  edgeExplorer.delete();
-  
-  // التحقق من الحدود
-  if (vertexCount > OPERATION_LIMITS.MAX_VERTICES) {
-    throw new Error(`Shape too complex: ${vertexCount} vertices exceed limit of ${OPERATION_LIMITS.MAX_VERTICES}`);
-  }
-  if (faceCount > OPERATION_LIMITS.MAX_FACES) {
-    throw new Error(`Shape too complex: ${faceCount} faces exceed limit of ${OPERATION_LIMITS.MAX_FACES}`);
-  }
-  if (edgeCount > OPERATION_LIMITS.MAX_EDGES) {
-    throw new Error(`Shape too complex: ${edgeCount} edges exceed limit of ${OPERATION_LIMITS.MAX_EDGES}`);
+  try {
+    // عد الرؤوس
+    const vertexExplorer = new occt.TopExp_Explorer(shape, occt.TopAbs_VERTEX);
+    while (vertexExplorer.More()) {
+      vertexCount++;
+      vertexExplorer.Next();
+    }
+    vertexExplorer.delete();
+    
+    // عد الوجوه
+    const faceExplorer = new occt.TopExp_Explorer(shape, occt.TopAbs_FACE);
+    while (faceExplorer.More()) {
+      faceCount++;
+      faceExplorer.Next();
+    }
+    faceExplorer.delete();
+    
+    // عد الحواف
+    const edgeExplorer = new occt.TopExp_Explorer(shape, occt.TopAbs_EDGE);
+    while (edgeExplorer.More()) {
+      edgeCount++;
+      edgeExplorer.Next();
+    }
+    edgeExplorer.delete();
+    
+    // التحقق من الحدود
+    if (vertexCount > OPERATION_LIMITS.MAX_VERTICES) {
+      throw new Error(`Shape too complex: ${vertexCount} vertices exceed limit of ${OPERATION_LIMITS.MAX_VERTICES}`);
+    }
+    if (faceCount > OPERATION_LIMITS.MAX_FACES) {
+      throw new Error(`Shape too complex: ${faceCount} faces exceed limit of ${OPERATION_LIMITS.MAX_FACES}`);
+    }
+    if (edgeCount > OPERATION_LIMITS.MAX_EDGES) {
+      throw new Error(`Shape too complex: ${edgeCount} edges exceed limit of ${OPERATION_LIMITS.MAX_EDGES}`);
+    }
+  } catch (error) {
+    console.warn('Failed to validate shape complexity:', error);
+    // نستمر على أي حال
   }
 }
 
@@ -924,15 +1191,17 @@ function transformShape(params) {
     
     if (transform.rotate) {
       // rotation implementation
-      const axis = new occt.gp_Ax1(
-        new occt.gp_Pnt(0, 0, 0),
-        new occt.gp_Dir(
-          transform.rotate.axis[0],
-          transform.rotate.axis[1],
-          transform.rotate.axis[2]
-        )
+      const center = new occt.gp_Pnt(0, 0, 0);
+      const direction = new occt.gp_Dir(
+        transform.rotate.axis[0],
+        transform.rotate.axis[1],
+        transform.rotate.axis[2]
       );
+      const axis = new occt.gp_Ax1(center, direction);
       trsf.SetRotation(axis, transform.rotate.angle * Math.PI / 180);
+      
+      center.delete();
+      direction.delete();
       axis.delete();
     }
     
@@ -959,8 +1228,8 @@ function transformShape(params) {
     };
     
   } catch (error) {
-    if (s) s.delete();
-    if (result) result.delete();
+    if (s && s.delete) s.delete();
+    if (result && result.delete) result.delete();
     throw new Error(`Transform failed: ${error.message}`);
   }
 }
@@ -1047,7 +1316,7 @@ function measureShape(params) {
     return result;
     
   } catch (error) {
-    if (s) s.delete();
+    if (s && s.delete) s.delete();
     throw new Error(`Measurement failed: ${error.message}`);
   }
 }
@@ -1097,8 +1366,8 @@ function filletShape(params) {
     };
     
   } catch (error) {
-    if (s) s.delete();
-    if (result) result.delete();
+    if (s && s.delete) s.delete();
+    if (result && result.delete) result.delete();
     throw new Error(`Fillet operation failed: ${error.message}`);
   }
 }
@@ -1171,8 +1440,8 @@ function chamferShape(params) {
     };
     
   } catch (error) {
-    if (s) s.delete();
-    if (result) result.delete();
+    if (s && s.delete) s.delete();
+    if (result && result.delete) result.delete();
     throw new Error(`Chamfer operation failed: ${error.message}`);
   }
 }
@@ -1218,8 +1487,8 @@ function extrudeProfile(params) {
     };
     
   } catch (error) {
-    if (profileShape) profileShape.delete();
-    if (result) result.delete();
+    if (profileShape && profileShape.delete) profileShape.delete();
+    if (result && result.delete) result.delete();
     throw new Error(`Extrude operation failed: ${error.message}`);
   }
 }
@@ -1266,9 +1535,31 @@ function revolveProfile(params) {
     };
     
   } catch (error) {
-    if (profileShape) profileShape.delete();
-    if (result) result.delete();
+    if (profileShape && profileShape.delete) profileShape.delete();
+    if (result && result.delete) result.delete();
     throw new Error(`Revolve operation failed: ${error.message}`);
+  }
+}
+
+/**
+ * إطلاق شكل من الذاكرة
+ */
+function releaseShape(params) {
+  const { shapeId } = params;
+  
+  try {
+    if (self._shapeCache && self._shapeCache.has(shapeId)) {
+      const shape = self._shapeCache.get(shapeId);
+      if (shape && shape.delete) {
+        shape.delete();
+      }
+      self._shapeCache.delete(shapeId);
+    }
+    
+    return { released: true };
+  } catch (error) {
+    console.warn('Failed to release shape:', error);
+    return { released: false, error: error.message };
   }
 }
 

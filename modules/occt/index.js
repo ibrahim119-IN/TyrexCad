@@ -11,7 +11,7 @@ export default class OCCTModule {
     
     // Worker pool configuration
     this.minWorkers = 2;
-    this.maxWorkers = 8;
+    this.maxWorkers = navigator.hardwareConcurrency || 4;
     this.workers = [];
     this.availableWorkers = [];
     this.busyWorkers = new Map(); // taskId -> worker
@@ -26,7 +26,16 @@ export default class OCCTModule {
       totalTasks: 0,
       completedTasks: 0,
       failedTasks: 0,
-      averageTime: 0
+      averageTime: 0,
+      workerCrashes: 0,
+      initFailures: 0
+    };
+    
+    // الحالة
+    this.state = {
+      initialized: false,
+      initializing: false,
+      lastError: null
     };
     
     this.setupHandlers();
@@ -71,18 +80,32 @@ export default class OCCTModule {
         });
     });
     
-    this.msg.on('occt.getWorkerStatus', (message) => {
+    this.msg.on('occt.getStatus', (message) => {
       if (message.requestId) {
         this.msg.reply(message.requestId, {
           success: true,
           result: {
-            total: this.workers.length,
-            available: this.availableWorkers.length,
-            busy: this.busyWorkers.size,
-            queued: this.taskQueue.length
+            initialized: this.state.initialized,
+            initializing: this.state.initializing,
+            workers: {
+              total: this.workers.length,
+              available: this.availableWorkers.length,
+              busy: this.busyWorkers.size
+            },
+            queue: {
+              length: this.taskQueue.length,
+              active: this.activeTasks.size
+            },
+            stats: this.stats,
+            lastError: this.state.lastError
           }
         });
       }
+    });
+    
+    // إعادة تهيئة Workers
+    this.msg.on('occt.reinitialize', async () => {
+      await this.reinitializeWorkers();
     });
   }
   
@@ -90,34 +113,82 @@ export default class OCCTModule {
    * تهيئة مجموعة Workers
    */
   async initializeWorkerPool() {
+    if (this.state.initializing) {
+      console.warn('OCCT already initializing');
+      return;
+    }
+    
+    this.state.initializing = true;
+    console.log('Initializing OCCT worker pool...');
+    
     try {
-      // الحصول على URLs للموارد - الطريقة المحدثة
-      const wasmUrl = await this.msg.request('resources.getUrl', {
-        resource: 'opencascade.wasm',
-        type: 'wasm'
-      });
+      // الحصول على URLs للموارد
+      const [wasmUrl, jsUrl] = await Promise.all([
+        this.msg.request('resources.getUrl', {
+          resource: 'opencascade.wasm',
+          type: 'wasm'
+        }),
+        this.msg.request('resources.getUrl', {
+          resource: 'opencascade.js',
+          type: 'javascript'
+        })
+      ]);
       
-      const jsUrl = await this.msg.request('resources.getUrl', {
-        resource: 'opencascade.js',
-        type: 'javascript'
-      });
+      console.log('Resource URLs:', { wasmUrl, jsUrl });
+      
+      // التحقق من URLs
+      if (!wasmUrl || !jsUrl) {
+        throw new Error('Failed to get resource URLs');
+      }
       
       // إنشاء Workers الأولية
       const workerPromises = [];
       for (let i = 0; i < this.minWorkers; i++) {
-        workerPromises.push(this.createWorker(wasmUrl, jsUrl));
+        workerPromises.push(this.createWorker(wasmUrl, jsUrl, i));
       }
       
-      const workers = await Promise.all(workerPromises);
-      this.workers = workers;
-      this.availableWorkers = [...workers];
+      const workers = await Promise.allSettled(workerPromises);
+      
+      // معالجة النتائج
+      const successfulWorkers = [];
+      const failedWorkers = [];
+      
+      workers.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          successfulWorkers.push(result.value);
+        } else {
+          failedWorkers.push({ index, error: result.reason });
+          this.stats.initFailures++;
+        }
+      });
+      
+      if (successfulWorkers.length === 0) {
+        throw new Error('Failed to create any workers');
+      }
+      
+      this.workers = successfulWorkers;
+      this.availableWorkers = [...successfulWorkers];
+      
+      console.log(`OCCT initialized with ${successfulWorkers.length} workers`);
+      
+      if (failedWorkers.length > 0) {
+        console.warn(`${failedWorkers.length} workers failed to initialize:`, failedWorkers);
+      }
+      
+      this.state.initialized = true;
+      this.state.initializing = false;
       
       this.msg.emit('occt.ready', {
-        workerCount: this.workers.length
+        workerCount: this.workers.length,
+        failures: failedWorkers.length
       });
       
     } catch (error) {
       console.error('Failed to initialize OCCT worker pool:', error);
+      this.state.lastError = error.message;
+      this.state.initializing = false;
+      this.stats.initFailures++;
+      
       this.msg.emit('occt.error', {
         type: 'initialization',
         error: error.message
@@ -128,51 +199,83 @@ export default class OCCTModule {
   /**
    * إنشاء worker جديد
    */
-  async createWorker(wasmUrl, jsUrl) {
+  async createWorker(wasmUrl, jsUrl, index = null) {
+    const workerId = index !== null ? `worker-${index}` : `worker-${Date.now()}`;
+    console.log(`Creating ${workerId}...`);
+    
     return new Promise(async (resolve, reject) => {
       try {
-        // تحميل worker code كـ string
-        const workerResponse = await fetch('/workers/occt-worker.js');
-        const workerCode = await workerResponse.text();
+        // التحقق من وجود worker file
+        const workerUrl = '/workers/occt-worker.js';
+        const checkResponse = await fetch(workerUrl);
+        
+        if (!checkResponse.ok) {
+          throw new Error(`Worker file not found at ${workerUrl} (${checkResponse.status})`);
+        }
+        
+        // تحميل worker code
+        const workerCode = await checkResponse.text();
+        
+        // التحقق من أن المحتوى هو JavaScript
+        if (workerCode.includes('<!DOCTYPE') || workerCode.includes('<html')) {
+          throw new Error('Worker file returned HTML instead of JavaScript');
+        }
+        
+        if (workerCode.length < 1000) {
+          throw new Error(`Worker file too small (${workerCode.length} bytes), possibly corrupted`);
+        }
         
         // إنشاء blob URL
         const blob = new Blob([workerCode], { type: 'application/javascript' });
-        const workerUrl = URL.createObjectURL(blob);
+        const blobUrl = URL.createObjectURL(blob);
         
-        // إنشاء worker من blob
-        const worker = new Worker(workerUrl);
+        // إنشاء worker
+        const worker = new Worker(blobUrl);
+        worker._id = workerId;
+        worker._blobUrl = blobUrl;
+        
+        // timeout للتهيئة
+        const initTimeout = setTimeout(() => {
+          console.error(`${workerId} initialization timeout`);
+          worker.terminate();
+          reject(new Error(`${workerId} initialization timeout`));
+        }, 60000); // 60 seconds for WASM loading
         
         let ready = false;
         
-        // تنظيف blob URL بعد التحميل
-        worker.addEventListener('message', function cleanup(e) {
-          if (e.data.type === 'ready') {
-            URL.revokeObjectURL(workerUrl);
-            worker.removeEventListener('message', cleanup);
-          }
-        });
-        
         worker.onmessage = (e) => {
           if (e.data.type === 'ready' && !ready) {
+            clearTimeout(initTimeout);
             ready = true;
+            console.log(`${workerId} ready`);
             resolve(worker);
           } else if (e.data.type === 'error' && !ready) {
+            clearTimeout(initTimeout);
+            console.error(`${workerId} init error:`, e.data.error);
             reject(new Error(e.data.error));
+          } else if (e.data.type === 'log') {
+            console.log(`[${workerId}]:`, e.data.result);
           }
+          
           // معالجة رسائل أخرى
-          this.handleWorkerMessage(worker, e);
+          if (ready) {
+            this.handleWorkerMessage(worker, e);
+          }
         };
         
         worker.onerror = (error) => {
-          console.error('Worker error:', error);
+          console.error(`${workerId} error:`, error);
+          clearTimeout(initTimeout);
+          
           if (!ready) {
-            reject(error);
+            reject(new Error(`${workerId} error: ${error.message || 'Unknown error'}`));
           } else {
             this.handleWorkerCrash(worker);
           }
         };
         
         // تهيئة الـ worker
+        console.log(`Initializing ${workerId}...`);
         worker.postMessage({
           type: 'init',
           wasmUrl,
@@ -180,7 +283,8 @@ export default class OCCTModule {
         });
         
       } catch (error) {
-        reject(new Error(`Failed to create worker: ${error.message}`));
+        console.error(`Failed to create ${workerId}:`, error);
+        reject(new Error(`Failed to create ${workerId}: ${error.message}`));
       }
     });
   }
@@ -201,7 +305,11 @@ export default class OCCTModule {
         break;
         
       case 'log':
-        console.log('[Worker]:', result);
+        console.log(`[${worker._id}]:`, result);
+        break;
+        
+      case 'warning':
+        console.warn(`[${worker._id}]:`, result);
         break;
     }
   }
@@ -210,6 +318,10 @@ export default class OCCTModule {
    * تنفيذ عملية في worker
    */
   async executeOperation(operation, params) {
+    if (!this.state.initialized) {
+      throw new Error('OCCT not initialized');
+    }
+    
     const taskId = `task_${++this.taskIdCounter}`;
     const startTime = Date.now();
     
@@ -220,11 +332,14 @@ export default class OCCTModule {
         params,
         resolve,
         reject,
-        startTime
+        startTime,
+        attempts: 0
       };
       
       this.activeTasks.set(taskId, task);
       this.taskQueue.push(task);
+      this.stats.totalTasks++;
+      
       this.processNextTask();
     });
   }
@@ -242,6 +357,8 @@ export default class OCCTModule {
     
     this.busyWorkers.set(task.id, worker);
     
+    console.log(`Assigning ${task.id} (${task.operation}) to ${worker._id}`);
+    
     worker.postMessage({
       type: 'execute',
       taskId: task.id,
@@ -255,10 +372,14 @@ export default class OCCTModule {
    */
   handleTaskComplete(taskId, result) {
     const task = this.activeTasks.get(taskId);
-    if (!task) return;
+    if (!task) {
+      console.warn(`Task ${taskId} not found`);
+      return;
+    }
     
     const worker = this.busyWorkers.get(taskId);
     if (worker) {
+      console.log(`${worker._id} completed ${taskId}`);
       this.busyWorkers.delete(taskId);
       this.availableWorkers.push(worker);
     }
@@ -266,7 +387,6 @@ export default class OCCTModule {
     // تحديث الإحصائيات
     const duration = Date.now() - task.startTime;
     this.stats.completedTasks++;
-    this.stats.totalTasks++;
     this.stats.averageTime = 
       (this.stats.averageTime * (this.stats.completedTasks - 1) + duration) / 
       this.stats.completedTasks;
@@ -284,17 +404,20 @@ export default class OCCTModule {
    */
   handleTaskError(taskId, error) {
     const task = this.activeTasks.get(taskId);
-    if (!task) return;
+    if (!task) {
+      console.warn(`Task ${taskId} not found`);
+      return;
+    }
     
     const worker = this.busyWorkers.get(taskId);
     if (worker) {
+      console.error(`${worker._id} failed ${taskId}:`, error);
       this.busyWorkers.delete(taskId);
       this.availableWorkers.push(worker);
     }
     
     // تحديث الإحصائيات
     this.stats.failedTasks++;
-    this.stats.totalTasks++;
     
     // رفض المهمة
     task.reject(new Error(error));
@@ -308,6 +431,14 @@ export default class OCCTModule {
    * معالجة تعطل Worker
    */
   async handleWorkerCrash(crashedWorker) {
+    console.error(`Worker ${crashedWorker._id} crashed`);
+    this.stats.workerCrashes++;
+    
+    // تنظيف blob URL
+    if (crashedWorker._blobUrl) {
+      URL.revokeObjectURL(crashedWorker._blobUrl);
+    }
+    
     // إزالة من القوائم
     const index = this.workers.indexOf(crashedWorker);
     if (index > -1) {
@@ -319,40 +450,72 @@ export default class OCCTModule {
       this.availableWorkers.splice(availIndex, 1);
     }
     
-    // البحث عن المهام المعلقة
+    // البحث عن المهام المعلقة وإعادتها للقائمة
+    const tasksToRetry = [];
     for (const [taskId, worker] of this.busyWorkers) {
       if (worker === crashedWorker) {
         const task = this.activeTasks.get(taskId);
         if (task) {
-          this.taskQueue.unshift(task);
-          this.busyWorkers.delete(taskId);
+          task.attempts++;
+          if (task.attempts < 3) {
+            tasksToRetry.push(task);
+          } else {
+            task.reject(new Error('Worker crashed and max retries reached'));
+            this.activeTasks.delete(taskId);
+            this.stats.failedTasks++;
+          }
         }
+        this.busyWorkers.delete(taskId);
       }
     }
     
-    // إنشاء worker جديد
-    try {
-      const wasmUrl = await this.msg.request('resources.getUrl', {
-        resource: 'opencascade.wasm',
-        type: 'wasm'
-      });
-      const jsUrl = await this.msg.request('resources.getUrl', {
-        resource: 'opencascade.js',
-        type: 'javascript'
-      });
-      
-      const newWorker = await this.createWorker(wasmUrl, jsUrl);
-      this.workers.push(newWorker);
-      this.availableWorkers.push(newWorker);
-      
-      this.processNextTask();
-    } catch (error) {
-      console.error('Failed to create replacement worker:', error);
-      this.msg.emit('occt.workerError', {
-        type: 'replacement-failed',
-        error: error.message
-      });
+    // إعادة المهام للقائمة
+    this.taskQueue.unshift(...tasksToRetry);
+    
+    // محاولة إنشاء worker بديل
+    if (this.workers.length < this.minWorkers) {
+      try {
+        const [wasmUrl, jsUrl] = await Promise.all([
+          this.msg.request('resources.getUrl', {
+            resource: 'opencascade.wasm',
+            type: 'wasm'
+          }),
+          this.msg.request('resources.getUrl', {
+            resource: 'opencascade.js',
+            type: 'javascript'
+          })
+        ]);
+        
+        const newWorker = await this.createWorker(wasmUrl, jsUrl);
+        this.workers.push(newWorker);
+        this.availableWorkers.push(newWorker);
+        
+        console.log(`Replacement worker created: ${newWorker._id}`);
+        
+        this.processNextTask();
+      } catch (error) {
+        console.error('Failed to create replacement worker:', error);
+        this.msg.emit('occt.workerError', {
+          type: 'replacement-failed',
+          error: error.message
+        });
+      }
     }
+  }
+  
+  /**
+   * إعادة تهيئة Workers
+   */
+  async reinitializeWorkers() {
+    console.log('Reinitializing OCCT workers...');
+    
+    // إيقاف جميع Workers الحالية
+    await this.cleanup();
+    
+    // إعادة التهيئة
+    this.state.initialized = false;
+    this.state.lastError = null;
+    await this.initializeWorkerPool();
   }
   
   // معالجات العمليات المختلفة
@@ -374,6 +537,7 @@ export default class OCCTModule {
       });
       
     } catch (error) {
+      console.error('Create box failed:', error);
       if (message.requestId) {
         this.msg.reply(message.requestId, {
           success: false,
@@ -400,6 +564,7 @@ export default class OCCTModule {
       });
       
     } catch (error) {
+      console.error('Create sphere failed:', error);
       if (message.requestId) {
         this.msg.reply(message.requestId, {
           success: false,
@@ -426,6 +591,7 @@ export default class OCCTModule {
       });
       
     } catch (error) {
+      console.error('Create cylinder failed:', error);
       if (message.requestId) {
         this.msg.reply(message.requestId, {
           success: false,
@@ -452,6 +618,7 @@ export default class OCCTModule {
       });
       
     } catch (error) {
+      console.error('Create cone failed:', error);
       if (message.requestId) {
         this.msg.reply(message.requestId, {
           success: false,
@@ -478,6 +645,7 @@ export default class OCCTModule {
       });
       
     } catch (error) {
+      console.error('Create torus failed:', error);
       if (message.requestId) {
         this.msg.reply(message.requestId, {
           success: false,
@@ -504,6 +672,7 @@ export default class OCCTModule {
       });
       
     } catch (error) {
+      console.error('Boolean operation failed:', error);
       if (message.requestId) {
         this.msg.reply(message.requestId, {
           success: false,
@@ -529,6 +698,7 @@ export default class OCCTModule {
       });
       
     } catch (error) {
+      console.error('Transform failed:', error);
       if (message.requestId) {
         this.msg.reply(message.requestId, {
           success: false,
@@ -554,6 +724,7 @@ export default class OCCTModule {
       });
       
     } catch (error) {
+      console.error('Mesh conversion failed:', error);
       if (message.requestId) {
         this.msg.reply(message.requestId, {
           success: false,
@@ -575,6 +746,7 @@ export default class OCCTModule {
       }
       
     } catch (error) {
+      console.error('Measure failed:', error);
       if (message.requestId) {
         this.msg.reply(message.requestId, {
           success: false,
@@ -601,6 +773,7 @@ export default class OCCTModule {
       });
       
     } catch (error) {
+      console.error('Fillet failed:', error);
       if (message.requestId) {
         this.msg.reply(message.requestId, {
           success: false,
@@ -627,6 +800,7 @@ export default class OCCTModule {
       });
       
     } catch (error) {
+      console.error('Chamfer failed:', error);
       if (message.requestId) {
         this.msg.reply(message.requestId, {
           success: false,
@@ -653,6 +827,7 @@ export default class OCCTModule {
       });
       
     } catch (error) {
+      console.error('Extrude failed:', error);
       if (message.requestId) {
         this.msg.reply(message.requestId, {
           success: false,
@@ -679,6 +854,7 @@ export default class OCCTModule {
       });
       
     } catch (error) {
+      console.error('Revolve failed:', error);
       if (message.requestId) {
         this.msg.reply(message.requestId, {
           success: false,
@@ -691,18 +867,52 @@ export default class OCCTModule {
   /**
    * تنظيف الموارد
    */
-  cleanup() {
+  async cleanup() {
+    console.log('Cleaning up OCCT module...');
+    
+    // إيقاف معالجة المهام
+    this.taskQueue = [];
+    
+    // رفض جميع المهام المعلقة
+    for (const [taskId, task] of this.activeTasks) {
+      task.reject(new Error('OCCT module shutting down'));
+    }
+    this.activeTasks.clear();
+    
     // إيقاف جميع Workers
+    const shutdownPromises = this.workers.map(worker => {
+      return new Promise(resolve => {
+        const shutdownTimeout = setTimeout(() => {
+          worker.terminate();
+          resolve();
+        }, 5000);
+        
+        worker.onmessage = (e) => {
+          if (e.data.type === 'shutdown-complete') {
+            clearTimeout(shutdownTimeout);
+            worker.terminate();
+            resolve();
+          }
+        };
+        
+        worker.postMessage({ type: 'shutdown' });
+      });
+    });
+    
+    await Promise.all(shutdownPromises);
+    
+    // تنظيف blob URLs
     this.workers.forEach(worker => {
-      worker.postMessage({ type: 'shutdown' });
-      worker.terminate();
+      if (worker._blobUrl) {
+        URL.revokeObjectURL(worker._blobUrl);
+      }
     });
     
     this.workers = [];
     this.availableWorkers = [];
     this.busyWorkers.clear();
-    this.taskQueue = [];
-    this.activeTasks.clear();
+    
+    console.log('OCCT cleanup complete');
   }
   
   // دورة الحياة
@@ -716,9 +926,12 @@ export default class OCCTModule {
 
   async healthCheck() {
     return {
-      healthy: true,
+      healthy: this.state.initialized && this.workers.length > 0,
+      initialized: this.state.initialized,
       workersCount: this.workers.length,
-      tasksQueued: this.taskQueue.length
+      tasksQueued: this.taskQueue.length,
+      activeTasks: this.activeTasks.size,
+      stats: this.stats
     };
   }
 }
