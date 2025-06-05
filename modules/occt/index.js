@@ -129,38 +129,59 @@ export default class OCCTModule {
    * إنشاء worker جديد
    */
   async createWorker(wasmUrl, jsUrl) {
-    return new Promise((resolve, reject) => {
-      // استخدام المسار الصحيح للـ worker
-      const worker = new Worker('/public/workers/occt-worker.js', { type: 'module' });
-      
-      let ready = false;
-      
-      worker.onmessage = (e) => {
-        if (e.data.type === 'ready' && !ready) {
-          ready = true;
-          resolve(worker);
-        } else if (e.data.type === 'error' && !ready) {
-          reject(new Error(e.data.error));
-        }
-        // معالجة رسائل أخرى
-        this.handleWorkerMessage(worker, e);
-      };
-      
-      worker.onerror = (error) => {
-        console.error('Worker error:', error);
-        if (!ready) {
-          reject(error);
-        } else {
-          this.handleWorkerCrash(worker);
-        }
-      };
-      
-      // تهيئة الـ worker
-      worker.postMessage({
-        type: 'init',
-        wasmUrl,
-        jsUrl
-      });
+    return new Promise(async (resolve, reject) => {
+      try {
+        // تحميل worker code كـ string
+        const workerResponse = await fetch('/workers/occt-worker.js');
+        const workerCode = await workerResponse.text();
+        
+        // إنشاء blob URL
+        const blob = new Blob([workerCode], { type: 'application/javascript' });
+        const workerUrl = URL.createObjectURL(blob);
+        
+        // إنشاء worker من blob
+        const worker = new Worker(workerUrl);
+        
+        let ready = false;
+        
+        // تنظيف blob URL بعد التحميل
+        worker.addEventListener('message', function cleanup(e) {
+          if (e.data.type === 'ready') {
+            URL.revokeObjectURL(workerUrl);
+            worker.removeEventListener('message', cleanup);
+          }
+        });
+        
+        worker.onmessage = (e) => {
+          if (e.data.type === 'ready' && !ready) {
+            ready = true;
+            resolve(worker);
+          } else if (e.data.type === 'error' && !ready) {
+            reject(new Error(e.data.error));
+          }
+          // معالجة رسائل أخرى
+          this.handleWorkerMessage(worker, e);
+        };
+        
+        worker.onerror = (error) => {
+          console.error('Worker error:', error);
+          if (!ready) {
+            reject(error);
+          } else {
+            this.handleWorkerCrash(worker);
+          }
+        };
+        
+        // تهيئة الـ worker
+        worker.postMessage({
+          type: 'init',
+          wasmUrl,
+          jsUrl
+        });
+        
+      } catch (error) {
+        reject(new Error(`Failed to create worker: ${error.message}`));
+      }
     });
   }
   

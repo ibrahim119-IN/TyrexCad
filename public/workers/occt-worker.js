@@ -105,25 +105,35 @@ async function initializeOCCT(wasmUrl, jsUrl) {
       result: 'Initializing OpenCASCADE...'
     });
     
-    // استخدام dynamic import للـ ES modules
-    const module = await import(jsUrl);
+    // تحميل OpenCASCADE بطريقة مختلفة
+    // استخدام fetch و eval للتوافق مع Vite
+    const response = await fetch(jsUrl);
+    const scriptText = await response.text();
     
-    // الحصول على OpenCascade من الـ module
-    const initOpenCascade = module.default || module.initOpenCascade;
-    
-    if (!initOpenCascade) {
-      throw new Error('Could not find OpenCascade initialization function');
-    }
+    // إنشاء wrapper function
+    const wrapperFunction = new Function('self', scriptText + '\n return Module;');
+    const Module = wrapperFunction(self);
     
     // تهيئة OpenCASCADE
-    occt = await initOpenCascade({
-      locateFile: (file) => {
-        if (file.endsWith('.wasm')) {
-          return wasmUrl;
+    if (Module && Module.initOpenCascade) {
+      occt = await Module.initOpenCascade({
+        locateFile: (file) => {
+          if (file.endsWith('.wasm')) {
+            return wasmUrl;
+          }
+          return file;
         }
-        return file;
-      }
-    });
+      });
+    } else if (typeof Module !== 'undefined') {
+      // طريقة بديلة
+      occt = await new Promise((resolve) => {
+        Module.onRuntimeInitialized = () => {
+          resolve(Module);
+        };
+      });
+    } else {
+      throw new Error('Could not initialize OpenCASCADE module');
+    }
     
     // التحقق من التهيئة
     if (!occt || !occt.BRepPrimAPI_MakeBox) {

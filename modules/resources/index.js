@@ -374,6 +374,16 @@ export default class ResourcesModule {
       return resourcePath;
     }
     
+    // معالجة خاصة لملفات OpenCASCADE
+   // معالجة خاصة لملفات OpenCASCADE
+    if (resourcePath === 'opencascade.wasm') {
+    const url = new URL('../libs/opencascade/opencascade.full.wasm', import.meta.url).href;
+    return url;
+    } else if (resourcePath === 'opencascade.js') {
+     const url = new URL('../libs/opencascade/opencascade.full.js', import.meta.url).href;
+        return url;
+    }
+    
     // في Electron
     if (typeof window !== 'undefined' && window.electronAPI?.getResourceUrl) {
       return window.electronAPI.getResourceUrl(resourcePath);
